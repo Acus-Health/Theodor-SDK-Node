@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Theodor API - Auscultation AI</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Theodor Auscultation AI</h1>
+      <p>Upload audio files for auscultation analysis</p>
+    </header>
+    
+    <main>
+      <section class="upload-section">
+        <h2>Upload Audio</h2>
+        <form id="uploadForm">
+          <div class="form-group">
+            <label for="audioFile">Audio File (WAV, MP3, OGG, M4A)</label>
+            <input type="file" id="audioFile" accept=".wav,.mp3,.ogg,.m4a" required>
+          </div>
+          
+          <div class="form-group">
+            <label for="site">Recording Site</label>
+            <select id="site" required>
+              <option value="heart" selected>Heart</option>
+              <option value="lung">Lung</option>
+              <option value="abdomen">Abdomen</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="examId">Exam ID (optional)</label>
+            <input type="text" id="examId" placeholder="Optional exam ID">
+          </div>
+          
+          <button type="submit" id="submitBtn">Analyze Audio</button>
+        </form>
+        
+        <div id="uploadStatus" class="status-box hidden"></div>
+      </section>
+      
+      <section class="results-section">
+        <h2>Analysis Results</h2>
+        <div id="resultsList"></div>
+      </section>
+    </main>
+    
+    <footer>
+      <p>Powered by Theodor.ai | <a href="/api/health">API Status</a></p>
+    </footer>
+  </div>
+  
+  <script src="js/app.js" unsafe-inline ></script>
+</body>
+</html>

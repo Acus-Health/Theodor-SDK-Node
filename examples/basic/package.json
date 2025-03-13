@@ -1,0 +1,13 @@
+{
+	"name": "theodor-sdk-basic-example",
+	"version": "1.0.0",
+	"description": "Basic example of using Theodor SDK",
+	"main": "index.js",
+	"scripts": {
+	  "start": "node index.js"
+	},
+	"dependencies": {
+	  "theodor-sdk": "file:../../",
+	  "dotenv": "^10.0.0"
+	}
+  }
