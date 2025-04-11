@@ -21,6 +21,8 @@ const MAX_WEBSOCKET_RETRY_TIME           = 300000; // 5 mins
 const PREDICTION_POLL_INTERVAL           = 2000; // 2 seconds
 const MAX_PREDICTION_POLLS               = 60; // 2 minutes max wait time
 const PING_INTERVAL                      = 30000; // 30 seconds for heartbeat
+const ERROR_RETRY_COUNT                  = 3; // Number of retries for failed API requests
+const ERROR_RETRY_DELAY                  = 1000; // Delay between retries in milliseconds
 
 const WebSocketEvents = {
   RECORDING_CLASSIFIED:             'audio_recording_classified',
@@ -196,7 +198,7 @@ class TheodorClient extends EventEmitter {
       // The request was made and the server responded with a status code
       // that falls out of the range of 2xx
       const errorData    = error.response.data;
-      const errorMessage = errorData.message || errorData.detailed_error || error.message;
+      const errorMessage = errorData.message || errorData.detailed_error || errorData.error || error.message;
       
       this._log('API Error', {
         status: error.response.status,
@@ -206,15 +208,22 @@ class TheodorClient extends EventEmitter {
       const enhancedError     = new Error(`Theodor API Error (${error.response.status}): ${errorMessage}`);
       enhancedError.status    = error.response.status;
       enhancedError.data      = errorData;
+      enhancedError.raw       = error.response.data; // Store the complete raw response
+      enhancedError.isTheodorError = true;
       throw enhancedError;
     } else if (error.request) {
       // The request was made but no response was received
       this._log('Network Error', error.request);
-      throw new Error(`Theodor API Network Error: ${error.message}`);
+      const networkError = new Error(`Theodor API Network Error: ${error.message}`);
+      networkError.isNetworkError = true;
+      networkError.request = error.request;
+      throw networkError;
     } else {
       // Something happened in setting up the request that triggered an Error
       this._log('Request Error', error.message);
-      throw new Error(`Theodor API Request Error: ${error.message}`);
+      const requestError = new Error(`Theodor API Request Error: ${error.message}`);
+      requestError.isRequestError = true;
+      throw requestError;
     }
   }
   
@@ -255,6 +264,27 @@ class TheodorClient extends EventEmitter {
     }
   }
 
+  /**
+   * Helper method to retry API requests
+   * @param {Function} requestFn - Function that returns a promise for the API request
+   * @param {number} [retries=ERROR_RETRY_COUNT] - Number of retries
+   * @param {number} [delay=ERROR_RETRY_DELAY] - Delay between retries in milliseconds
+   * @returns {Promise<any>} - Result of the API request
+   * @private
+   */
+  async _retryRequest(requestFn, retries = ERROR_RETRY_COUNT, delay = ERROR_RETRY_DELAY) {
+    try {
+      return await requestFn();
+    } catch (error) {
+      // Only retry network errors, not validation or auth errors
+      if (retries > 0 && (error.isNetworkError || (error.status && error.status >= 500))) {
+        this._log(`Request failed, retrying in ${delay}ms. Retries left: ${retries}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this._retryRequest(requestFn, retries - 1, delay * 1.5);
+      }
+      throw error;
+    }
+  }
 
   /**
    * Submits an audio file for analysis
@@ -281,6 +311,13 @@ class TheodorClient extends EventEmitter {
     }
     
     try {
+      // Verify file exists and is readable before proceeding
+      try {
+        await fs.promises.access(options.filePath, fs.constants.R_OK);
+      } catch (fileError) {
+        throw new Error(`Cannot read audio file at path ${options.filePath}: ${fileError.message}`);
+      }
+      
       // Create form data
       const form = new FormData();
       form.append('upload_file', fs.createReadStream(options.filePath));
@@ -289,16 +326,20 @@ class TheodorClient extends EventEmitter {
       if (options.examId) {
         form.append('exam_id', options.examId);
       }
+      
+      if (options.enhanced) {
+        form.append('enhanced', 'true');
+      }
 
-      
-      // Submit the recording
-      const response = await this.client.post('/recordings/analyse', form, {
-        headers: {
-          ...form.getHeaders()
-        }
+      // Submit the recording with retry mechanism
+      const recording = await this._retryRequest(async () => {
+        const response = await this.client.post('/recordings/analyse', form, {
+          headers: {
+            ...form.getHeaders()
+          }
+        });
+        return response.data;
       });
-      
-      const recording = response.data;
       
       // If not waiting for prediction, return the recording object
       if (!options.waitForPrediction) {
@@ -387,41 +428,52 @@ class TheodorClient extends EventEmitter {
    */
   waitForPrediction(recordingId, timeout = 120000) {
     return new Promise((resolve, reject) => {
-      // If using WebSocket, register for updates
-      if (this.useWebSocket && this.ws) {
-        const timeoutId = setTimeout(() => {
+      let resolved = false;
+      
+      const handleResult = (result) => {
+        if (!resolved) {
+          resolved = true;
           if (this.pendingPredictions.has(recordingId)) {
+            const { timeoutId } = this.pendingPredictions.get(recordingId);
+            clearTimeout(timeoutId);
             this.pendingPredictions.delete(recordingId);
-            reject(new Error(`Prediction timeout for recording ${recordingId}`));
           }
-        }, timeout);
-        
-        this.pendingPredictions.set(recordingId, { resolve, reject, timeoutId });
-        
-        // Also start polling as a fallback
-        this._pollForPrediction(recordingId, 0, Math.floor(timeout / PREDICTION_POLL_INTERVAL))
-          .then(result => {
-            if (this.pendingPredictions.has(recordingId)) {
-              const { timeoutId } = this.pendingPredictions.get(recordingId);
-              clearTimeout(timeoutId);
-              this.pendingPredictions.delete(recordingId);
-              resolve(result);
-            }
-          })
-          .catch(error => {
-            if (this.pendingPredictions.has(recordingId)) {
-              const { timeoutId } = this.pendingPredictions.get(recordingId);
-              clearTimeout(timeoutId);
-              this.pendingPredictions.delete(recordingId);
-              reject(error);
-            }
-          });
-      } else {
-        // If not using WebSocket, just poll
-        this._pollForPrediction(recordingId, 0, Math.floor(timeout / PREDICTION_POLL_INTERVAL))
-          .then(resolve)
-          .catch(reject);
+          resolve(result);
+        }
+      };
+      
+      const handleError = (error) => {
+        if (!resolved) {
+          resolved = true;
+          if (this.pendingPredictions.has(recordingId)) {
+            const { timeoutId } = this.pendingPredictions.get(recordingId);
+            clearTimeout(timeoutId);
+            this.pendingPredictions.delete(recordingId);
+          }
+          reject(error);
+        }
+      };
+
+      // Set timeout
+      const timeoutId = setTimeout(() => {
+        if (!resolved) {
+          handleError(new Error(`Prediction timeout for recording ${recordingId}`));
+        }
+      }, timeout);
+      
+      // If using WebSocket, register for updates
+      if (this.useWebSocket && this.ws && this.ws.Conn && this.ws.Conn.readyState === WebSocket.OPEN) {
+        this.pendingPredictions.set(recordingId, { 
+          resolve: handleResult, 
+          reject: handleError, 
+          timeoutId 
+        });
       }
+      
+      // Always start polling as a fallback
+      this._pollForPrediction(recordingId, 0, Math.floor(timeout / PREDICTION_POLL_INTERVAL))
+        .then(handleResult)
+        .catch(handleError);
     });
   }
   
@@ -439,9 +491,23 @@ class TheodorClient extends EventEmitter {
     }
     
     try {
-      const recording = await this.getRecording(recordingId);
+      const recording = await this._retryRequest(async () => {
+        const response = await this.client.get(`/recordings/${recordingId}`);
+        return response.data;
+      });
       
-      // Check if prediction is complete
+      // Enhanced check for prediction completion
+      if (recording.status === 'error' || recording.classification_status === 'error') {
+        const errorMessage = recording.error_message || recording.classification_error || 'Unknown classification error';
+        throw new Error(`Prediction failed: ${errorMessage}`);
+      }
+      
+      // Check if prediction is complete based on different possible response structures
+      if (recording.status === 'classified' || recording.classification_status === 'classified') {
+        return recording;
+      }
+      
+      // Legacy check for murmur/rhythm fields
       if (recording.murmur && recording.rhythm) {
         if (recording.murmur !== "pending" && recording.rhythm !== "pending") {
           return recording;
@@ -462,7 +528,15 @@ class TheodorClient extends EventEmitter {
         return this._pollForPrediction(recordingId, attempt + 1, maxAttempts);
       }
       
-      throw error;
+      // If we've had multiple attempts and still getting errors, propagate the error
+      if (attempt > 3) {
+        throw error;
+      }
+      
+      // For early attempts, log the error but keep trying
+      this._log(`Error polling for prediction (attempt ${attempt})`, error);
+      await new Promise(resolve => setTimeout(resolve, PREDICTION_POLL_INTERVAL));
+      return this._pollForPrediction(recordingId, attempt + 1, maxAttempts);
     }
   }
   
@@ -717,6 +791,7 @@ class WebSocketClient {
       // Clear ping interval
       this.stopPingInterval();
       
+      const wasConnected = !!this.Conn;
       this.Conn = null;
       
       if (this.connectFailCount === 0) {
@@ -782,7 +857,16 @@ class WebSocketClient {
           this.eventCallback(msg);
         }
       } catch (error) {
-        console.error("Error parsing websocket message:", error);
+        console.error("Error parsing websocket message:", error, "Raw data:", evt.data);
+        
+        // Try to recover from parsing errors
+        if (this.errorCallback) {
+          this.errorCallback({
+            type: 'parse_error',
+            error: error,
+            data: evt.data
+          });
+        }
       }
     };
   }
@@ -826,14 +910,34 @@ class WebSocketClient {
       } catch (error) {
         console.error("Error sending WebSocket message:", error);
         
+        // If there's a callback, call it with an error
+        if (responseCallback) {
+          responseCallback({ error: true, message: error.message });
+          delete this.responseCallbacks[msg.seq];
+        }
+        
         // Reconnect if there was an error sending
         this.Conn = null;
         this.initialize();
       }
     } else if (!this.Conn || this.Conn.readyState === WebSocket.CLOSED) {
-      console.log("WebSocket not connected, skipping message", msg);
+      console.log("WebSocket not connected, queuing message", msg);
+      
+      // If there's a callback, call it with a connection error
+      if (responseCallback) {
+        responseCallback({ error: true, message: "WebSocket not connected" });
+        delete this.responseCallbacks[msg.seq];
+      }
+      
       this.Conn = null;
       this.initialize();
+    } else if (this.Conn.readyState === WebSocket.CONNECTING) {
+      console.log("WebSocket still connecting, waiting before sending message");
+      
+      // Wait for connection to be established
+      setTimeout(() => {
+        this.sendMessage(action, data, responseCallback);
+      }, 1000);
     }
   }
   

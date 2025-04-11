@@ -23,6 +23,19 @@ client.on('websocket_connected', () => {
   console.log('WebSocket connected!');
 });
 
+client.on('websocket_error', (error) => {
+  console.warn('WebSocket error occurred:', error);
+  console.log('This is handled gracefully - the client will attempt to reconnect');
+});
+
+client.on('websocket_reconnected', () => {
+  console.log('WebSocket reconnected successfully!');
+});
+
+client.on('recording_classification_failure', (data) => {
+  console.error('Recording classification failed:', data);
+});
+
 async function analyse() {
   try {
     console.log('Analyzing auscultation file');
@@ -32,19 +45,42 @@ async function analyse() {
     
     // Upload file for analysis and wait for prediction
     const result = await client.analyzeRecording({
-      filePath: filePath,
-      site: 'heart',
+      filePath:         filePath,
+      site:             'heart',
       waitForPrediction: true,
-      timeout: 60000 // 60 seconds
+      timeout:           60000 // 60 seconds
     });
     
     console.log('Analysis complete!');
     console.log(JSON.stringify(result, null, 2));
     
+    // Test error handling with non-existent file
+    try {
+      console.log('Testing error handling with non-existent file...');
+      await client.analyzeRecording({
+        filePath: 'non_existent_file.wav',
+        site: 'heart'
+      });
+    } catch (fileError) {
+      console.log('Expected error caught successfully:', fileError.message);
+    }
+    
     // Close client when done
     client.close();
   } catch (error) {
-    console.error('Error analyzing auscultation file:', error);
+    console.error('Error analyzing auscultation file:');
+    
+    if (error.isTheodorError) {
+      console.error(`API Error (${error.status}):`, error.data);
+      if (error.data.detailed_error) {
+        console.error('Detailed error:', error.data.detailed_error);
+      }
+    } else if (error.isNetworkError) {
+      console.error('Network error - check your internet connection');
+    } else {
+      console.error(error);
+    }
+    
     client.close();
   }
 }
