@@ -1,40 +1,4 @@
-const TheodorClient = require('theodor-sdk');
-
-/**
- * Enhances error with user-friendly information
- * @param {Error} error - Original error
- * @returns {Error} - Enhanced error
- */
-function enhanceError(error) {
-  if (error.isTheodorError || error.isNetworkError || error.isRequestError) {
-    // Already enhanced by the client
-    return error;
-  }
-  
-  // Add user-friendly message and categorization
-  const enhancedError = new Error(`Theodor Service Error: ${error.message}`);
-  enhancedError.originalError = error;
-  
-  if (error.message.includes('Cannot read audio file') || 
-      error.message.includes('file format') ||
-      error.message.includes('Invalid audio')) {
-    enhancedError.code = 'INVALID_AUDIO';
-    enhancedError.userMessage = 'The audio file could not be processed. Please check the format and try again.';
-    enhancedError.statusCode = 400;
-  } else if (error.message.includes('connection') || 
-             error.message.includes('network') || 
-             error.message.includes('timeout')) {
-    enhancedError.code = 'CONNECTION_ERROR';
-    enhancedError.userMessage = 'Connection to the analysis service failed. Please try again later.';
-    enhancedError.statusCode = 502;
-  } else {
-    enhancedError.code = 'SERVICE_ERROR';
-    enhancedError.userMessage = 'An error occurred while analyzing the audio.';
-    enhancedError.statusCode = 500;
-  }
-  
-  return enhancedError;
-}
+const TheodorClient = require('./theodor-sdk');
 
 /**
  * Creates and returns a configured Theodor client instance
@@ -48,7 +12,6 @@ function getTheodorClient() {
   // For Lambda, disable WebSocket by default since we don't need real-time updates
   return new TheodorClient({
     apiKey: process.env.THEODOR_API_KEY,
-    useWebSocket: false,
     debug: process.env.DEBUG === 'true'
   });
 }
@@ -79,26 +42,21 @@ function formatResponse(statusCode, body, headers = {}) {
  * @returns {Object} - Formatted API Gateway error response
  */
 function formatErrorResponse(error) {
-  // Enhance the error with user-friendly information if needed
-  const enhancedErr = error.isTheodorError || error.statusCode ? error : enhanceError(error);
-  
   // Determine status code
-  let statusCode = enhancedErr.statusCode || 500;
-  if (enhancedErr.isTheodorError && enhancedErr.status) {
-    statusCode = enhancedErr.status;
+  let statusCode = error.statusCode || 500;
+  if (error.isTheodorError && error.status) {
+    statusCode = error.status;
   }
   
   // Format the response body
   const responseBody = {
-    error: enhancedErr.userMessage || enhancedErr.message,
-    code: enhancedErr.code || 'UNKNOWN_ERROR'
+    error: error.message,
+    code: error.code || 'UNKNOWN_ERROR'
   };
   
   // Add detailed error information in development mode
   if (process.env.DEBUG === 'true') {
-    responseBody.details = enhancedErr.isTheodorError ? 
-      enhancedErr.data : 
-      (enhancedErr.originalError ? enhancedErr.originalError.message : enhancedErr.stack);
+    responseBody.details = error.stack;
   }
   
   return formatResponse(statusCode, responseBody);
@@ -153,7 +111,6 @@ function validateAudioData(data, mimeType) {
 
 module.exports = {
   getTheodorClient,
-  enhanceError,
   formatResponse,
   formatErrorResponse,
   validateAudioData

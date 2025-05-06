@@ -1,16 +1,25 @@
 service: theodor-sdk-lambda-example
 
+plugins:
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 3000
+    lambdaPort: 3002
+
 provider:
   name: aws
-  runtime: nodejs14.x
+  runtime: nodejs16.x
   region: us-east-1
   timeout: 30
+  memorySize: 1024
   environment:
-    THEODOR_API_KEY: ${env:THEODOR_API_KEY}
+    THEODOR_API_KEY: ${env:THEODOR_API_KEY, 'your-api-key-placeholder'}
 
 functions:
-  analyzeHeartSound:
-    handler: handler.analyzeHeartSound
+  analyse:
+    handler: handler.analyse
     events:
       - http:
           path: analyze
